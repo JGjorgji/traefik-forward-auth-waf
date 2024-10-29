@@ -72,18 +72,22 @@ WantedBy=default.target
 
 ### Configuring traefik
 
-To configure your container with labels, assuming this is running on your host and not another container add the following labels. Replace `http://host.containers.internal:1111` with the docker/podman container if you're running it there.
+#### Enable for an individual container
 
-To configure an individual router use:
+To configure your container with labels:
 
 ```yaml
 - traefik.http.middlewares.traefik-forward-auth-waf.forwardauth.address=http://traefik-forward-auth-waf:1111
 - traefik.http.routers.example-router.middlewares=traefik-forward-auth-waf
 ```
 
-In your traefik config file you can enable the middleware for all routers by adding `traefik-forward-auth-waf` to the middlewares section of your router configuration:. 
+If this is running on your host and not another container, replace the URL with `http://host.containers.internal:1111` to point to the host.
 
-Example:
+Note you'll need to define the middleware in the traefik container if you want this for multiple other containers, just take the middleware definition and put it there, it's the first line.
+
+#### Enable for an entrypoint
+
+In your traefik config file you can enable the middleware for all routers by adding `traefik-forward-auth-waf` to the middlewares section of your router configuration:
 
 ```yml
 entryPoints:
@@ -91,7 +95,30 @@ entryPoints:
     address: :443
     http:
       middlewares:
-        - traefik-forward-auth-waf
+        - traefik-forward-auth-waf@file
+```
+
+You will also need to configure the middleware in your dynamic configuration:
+
+```yml
+# config.yml
+http:
+  middlewares:
+    traefik-forward-auth-waf:
+      forwardAuth:
+        address: "http://traefik-forward-auth-waf:1111"
+```
+
+The files needs to be included as a dynamic configuration (provider) in your main configuration (it could be container labels or a file). Here is an example of a file configuration:
+
+```yml
+# traefik.yml
+providers:
+  docker:
+    exposedbydefault: false
+  file:
+    filename: /etc/traefik/config.yml
+    watch: true
 ```
 
 ## Development
