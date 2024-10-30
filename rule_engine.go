@@ -18,11 +18,11 @@ const (
 	TOKEN_NOT
 	TOKEN_FIELD
 	TOKEN_COMPARISON
+	TOKEN_SET_COMPARISON
 	TOKEN_STRING
 	TOKEN_NUMBER
-	TOKEN_LBRACKET
-	TOKEN_RBRACKET
-	TOKEN_COMMA
+	TOKEN_LCURLY
+	TOKEN_RCURLY
 	TOKEN_LOGICAL_OP
 	TOKEN_EOF
 )
@@ -85,16 +85,13 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 		case char == ')':
 			l.addToken(TOKEN_RPAREN, ")")
 			l.advance()
-		case char == '[':
-			l.addToken(TOKEN_LBRACKET, "[")
+		case char == '{':
+			l.addToken(TOKEN_LCURLY, "{")
 			l.advance()
-		case char == ']':
-			l.addToken(TOKEN_RBRACKET, "]")
+		case char == '}':
+			l.addToken(TOKEN_RCURLY, "}")
 			l.advance()
-		case char == ',':
-			l.addToken(TOKEN_COMMA, ",")
-			l.advance()
-		case char == '\'':
+		case char == '"':
 			token, err := l.readString()
 			if err != nil {
 				return nil, err
@@ -109,8 +106,10 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 				l.addToken(TOKEN_NOT, word)
 			case "uri", "host", "ip", "country":
 				l.addToken(TOKEN_FIELD, word)
-			case "eq", "ne", "in", "wildcard":
+			case "eq", "ne", "wildcard":
 				l.addToken(TOKEN_COMPARISON, word)
+			case "in":
+				l.addToken(TOKEN_SET_COMPARISON, word)
 			case "and", "or":
 				l.addToken(TOKEN_LOGICAL_OP, word)
 			default:
@@ -143,7 +142,7 @@ func (l *Lexer) addToken(tokenType TokenType, value string) {
 func (l *Lexer) readString() (string, error) {
 	l.advance() // Skip opening quote
 	start := l.position
-	for l.position < len(l.input) && l.current() != '\'' {
+	for l.position < len(l.input) && l.current() != '"' {
 		l.advance()
 	}
 	if l.position >= len(l.input) {
@@ -170,67 +169,124 @@ func NewParser(tokens []Token) *Parser {
 	}
 }
 
-// Parse parses the tokens into an AST
 func (p *Parser) Parse() (Node, error) {
-	return p.parseCompound()
+	return p.parseExpr()
 }
 
-func (p *Parser) parseCompound() (Node, error) {
-	expr, err := p.parseExpression()
+func (p *Parser) parseExpr() (Node, error) {
+	var expr Node
+	var err error
+
+	// Parse first expression (either simple or compound)
+	if p.current().Type == TOKEN_LPAREN {
+		expr, err = p.parseCompoundExpr()
+	} else {
+		expr, err = p.parseSimpleExpr()
+	}
+
 	if err != nil {
 		return Node{}, err
 	}
 
-	nodes := []Node{expr}
-
+	// Look for additional expressions connected by logical operators
 	for p.position < len(p.tokens)-1 && p.current().Type == TOKEN_LOGICAL_OP {
-		op := p.current().Value
+		operator := p.current().Value
 		p.advance()
 
-		right, err := p.parseExpression()
+		var rightExpr Node
+		if p.current().Type == TOKEN_LPAREN {
+			rightExpr, err = p.parseCompoundExpr()
+		} else {
+			rightExpr, err = p.parseSimpleExpr()
+		}
+
 		if err != nil {
 			return Node{}, err
 		}
 
-		nodes = append(nodes, Node{Type: NODE_EXPRESSION, Value: op})
-		nodes = append(nodes, right)
+		expr = Node{
+			Type: NODE_COMPOUND,
+			Children: []Node{
+				expr,
+				{Type: NODE_EXPRESSION, Value: operator},
+				rightExpr,
+			},
+		}
 	}
 
-	if len(nodes) == 1 {
-		return nodes[0], nil
-	}
-
-	return Node{
-		Type:     NODE_COMPOUND,
-		Children: nodes,
-	}, nil
+	return expr, nil
 }
 
-func (p *Parser) parseExpression() (Node, error) {
+func (p *Parser) parseCompoundExpr() (Node, error) {
 	if p.current().Type != TOKEN_LPAREN {
 		return Node{}, errors.New("expected left parenthesis")
 	}
 	p.advance()
 
-	// Check for negation inside parentheses
-	innerNegated := false
-	if p.current().Type == TOKEN_NOT {
-		innerNegated = true
-		p.advance()
-	}
-
-	stmt, err := p.parseStatement()
+	expr, err := p.parseExpr()
 	if err != nil {
 		return Node{}, err
 	}
-
-	// Update the statement's negation status
-	stmt.Negated = innerNegated
 
 	if p.current().Type != TOKEN_RPAREN {
 		return Node{}, errors.New("expected right parenthesis")
 	}
 	p.advance()
+
+	return expr, nil
+}
+
+func (p *Parser) parseSimpleExpr() (Node, error) {
+	// Check for negation
+	negated := false
+	if p.current().Type == TOKEN_NOT {
+		negated = true
+		p.advance()
+	}
+
+	if p.current().Type != TOKEN_FIELD {
+		return Node{}, errors.New("expected field")
+	}
+	field := p.current().Value
+	p.advance()
+
+	// Parse operator
+	var operator string
+	var isSetComparison bool
+
+	switch p.current().Type {
+	case TOKEN_COMPARISON:
+		if negated {
+			return Node{}, errors.New("negation only allowed with set comparison")
+		}
+		operator = p.current().Value
+		isSetComparison = false
+	case TOKEN_SET_COMPARISON:
+		operator = p.current().Value
+		isSetComparison = true
+	default:
+		return Node{}, errors.New("expected comparison operator")
+	}
+	p.advance()
+
+	// Parse value based on operator type
+	var value Node
+	var err error
+	if isSetComparison {
+		value, err = p.parseSet()
+	} else {
+		value, err = p.parseValue()
+	}
+	if err != nil {
+		return Node{}, err
+	}
+
+	stmt := Node{
+		Type:     NODE_STATEMENT,
+		Value:    fmt.Sprintf("%s %s", field, operator),
+		Children: []Node{value},
+		Negated:  negated,
+	}
 
 	return Node{
 		Type:     NODE_EXPRESSION,
@@ -238,46 +294,18 @@ func (p *Parser) parseExpression() (Node, error) {
 	}, nil
 }
 
-func (p *Parser) parseStatement() (Node, error) {
-	if p.current().Type != TOKEN_FIELD {
-		return Node{}, errors.New("expected field")
-	}
-	field := p.current().Value
-	p.advance()
-
-	if p.current().Type != TOKEN_COMPARISON {
-		return Node{}, errors.New("expected comparison operator")
-	}
-	operator := p.current().Value
-	p.advance()
-
-	value, err := p.parseValue()
-	if err != nil {
-		return Node{}, err
-	}
-
-	return Node{
-		Type:     NODE_STATEMENT,
-		Value:    fmt.Sprintf("%s %s", field, operator),
-		Children: []Node{value},
-	}, nil
-}
-
 func (p *Parser) parseValue() (Node, error) {
-	if p.current().Type == TOKEN_LBRACKET {
-		return p.parseList()
+	if p.current().Type != TOKEN_STRING {
+		return Node{}, errors.New("expected string value")
 	}
-	if p.current().Type == TOKEN_STRING {
-		value := p.current().Value
-		p.advance()
-		return Node{Type: NODE_EXPRESSION, Value: value}, nil
-	}
-	return Node{}, errors.New("expected value")
+	value := p.current().Value
+	p.advance()
+	return Node{Type: NODE_EXPRESSION, Value: value}, nil
 }
 
-func (p *Parser) parseList() (Node, error) {
-	if p.current().Type != TOKEN_LBRACKET {
-		return Node{}, errors.New("expected left bracket")
+func (p *Parser) parseSet() (Node, error) {
+	if p.current().Type != TOKEN_LCURLY {
+		return Node{}, errors.New("expected left curly brace")
 	}
 	p.advance()
 
@@ -285,20 +313,16 @@ func (p *Parser) parseList() (Node, error) {
 	for p.current().Type == TOKEN_STRING {
 		items = append(items, Node{Type: NODE_EXPRESSION, Value: p.current().Value})
 		p.advance()
-
-		if p.current().Type == TOKEN_COMMA {
-			p.advance()
-		}
 	}
 
-	if p.current().Type != TOKEN_RBRACKET {
-		return Node{}, errors.New("expected right bracket")
+	if p.current().Type != TOKEN_RCURLY {
+		return Node{}, errors.New("expected right curly brace")
 	}
 	p.advance()
 
 	return Node{
 		Type:     NODE_EXPRESSION,
-		Value:    "list",
+		Value:    "set",
 		Children: items,
 	}, nil
 }
@@ -312,20 +336,6 @@ func (p *Parser) current() Token {
 
 func (p *Parser) advance() {
 	p.position++
-}
-
-// PrintAST prints the AST in a readable format
-func PrintAST(node Node, indent string) {
-	fmt.Printf("%sType: %v\n", indent, node.Type)
-	if node.Value != "" {
-		fmt.Printf("%sValue: %v\n", indent, node.Value)
-	}
-	if node.Negated {
-		fmt.Printf("%sNegated: true\n", indent)
-	}
-	for _, child := range node.Children {
-		PrintAST(child, indent+"  ")
-	}
 }
 
 // Context holds the variable values for evaluation
@@ -342,22 +352,20 @@ func NewContext() *Context {
 
 // Evaluator holds the functions for evaluating different operations
 type Evaluator struct {
-	// Function types for different operations
 	EqualityFn    func(value string, target string) bool
-	InFn          func(value string, targets []string) bool
-	InIpFn        func(value string, targets []string) bool
+	InSetFn       func(value string, targets []string) bool
+	InIpSetFn     func(value string, targets []string) bool
 	NotEqualityFn func(value string, target string) bool
 	WildCardFn    func(value string, target string) bool
 }
 
-// NewEvaluator creates a new evaluator with custom functions
+// NewEvaluator creates a new evaluator with default implementations
 func NewEvaluator() *Evaluator {
 	return &Evaluator{
-		// Default implementations that can be overridden
 		EqualityFn: func(value string, target string) bool {
 			return value == target
 		},
-		InFn: func(value string, targets []string) bool {
+		InSetFn: func(value string, targets []string) bool {
 			for _, t := range targets {
 				if value == t {
 					return true
@@ -365,15 +373,27 @@ func NewEvaluator() *Evaluator {
 			}
 			return false
 		},
-		InIpFn: func(value string, targets []string) bool {
+		InIpSetFn: func(value string, targets []string) bool {
 			valueIp := net.ParseIP(value)
+			if valueIp == nil {
+				return false
+			}
 			for _, t := range targets {
-				_, subnet, err := net.ParseCIDR(t)
-				if err != nil {
-					return false
-				}
-				if subnet.Contains(valueIp) {
-					return true
+				// Check if target is CIDR notation
+				if strings.Contains(t, "/") {
+					_, subnet, err := net.ParseCIDR(t)
+					if err != nil {
+						continue
+					}
+					if subnet.Contains(valueIp) {
+						return true
+					}
+				} else {
+					// Direct IP comparison
+					targetIP := net.ParseIP(t)
+					if targetIP != nil && targetIP.Equal(valueIp) {
+						return true
+					}
 				}
 			}
 			return false
@@ -464,7 +484,6 @@ func (e *Evaluator) evaluateStatement(node Node, ctx *Context) (bool, error) {
 	}
 
 	valueNode := node.Children[0]
-
 	var result bool
 
 	switch operator {
@@ -475,8 +494,8 @@ func (e *Evaluator) evaluateStatement(node Node, ctx *Context) (bool, error) {
 		result = e.EqualityFn(value, valueNode.Value)
 
 	case "in":
-		if valueNode.Value != "list" {
-			return false, fmt.Errorf("in operator expects a list")
+		if valueNode.Value != "set" {
+			return false, fmt.Errorf("in operator expects a set")
 		}
 		values := make([]string, len(valueNode.Children))
 		for i, child := range valueNode.Children {
@@ -484,9 +503,9 @@ func (e *Evaluator) evaluateStatement(node Node, ctx *Context) (bool, error) {
 		}
 
 		if field == "ip" {
-			result = e.InIpFn(value, values)
+			result = e.InIpSetFn(value, values)
 		} else {
-			result = e.InFn(value, values)
+			result = e.InSetFn(value, values)
 		}
 
 	case "ne":
@@ -497,7 +516,7 @@ func (e *Evaluator) evaluateStatement(node Node, ctx *Context) (bool, error) {
 
 	case "wildcard":
 		if valueNode.Type != NODE_EXPRESSION {
-			return false, fmt.Errorf("ne operator expects a single value")
+			return false, fmt.Errorf("wildcard operator expects a single value")
 		}
 		result = e.WildCardFn(value, valueNode.Value)
 
@@ -553,7 +572,11 @@ func (ee *ExpressionEvaluator) SetEqualityFn(fn func(value string, target string
 }
 
 func (ee *ExpressionEvaluator) SetInFn(fn func(value string, targets []string) bool) {
-	ee.evaluator.InFn = fn
+	ee.evaluator.InSetFn = fn
+}
+
+func (ee *ExpressionEvaluator) SetInIpSetFn(fn func(value string, targets []string) bool) {
+	ee.evaluator.InIpSetFn = fn
 }
 
 func (ee *ExpressionEvaluator) SetNotEqualityFn(fn func(value string, target string) bool) {

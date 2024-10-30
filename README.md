@@ -131,17 +131,18 @@ To run in dev mode, install [air](https://github.com/air-verse/air) then run
 The rules should follow the following EBNF syntax:
 
 ```bnf
-<expr> ::=  <negation>? "(" <negation>? <statement> ")"
 <negation> ::= "not "
-<field> ::= "uri" | "host" | "ip"
-<value> ::= <list> | <string> | <number>
-<statement> ::= <field> " " <comparison_operator> " " <value>
-<string> ::= "'" ([a-z]* | [A-Z]*) "'"
-<number> ::= "'" [0-9]* "'"
-<list_item> ::= <string> ","?
-<list> ::= "[" <list_item>+ "]"
-<comparison_operator> ::= "eq" | "ne" | "in" | "wildcard"
+<field> ::= "uri" | "host" | "ip" | "country"
+<value> ::= <string> | <number>
+<number> ::= "\"" [0-9]* "\""
+<string> ::= "\"" ([a-z]* | [A-Z]*) "\""
+<list_item> ::= <string> " "*
+<list> ::= "{" <list_item>+ "}"
+<comparison_operator> ::= "eq" | "ne" | "wildcard"
+<set_comparison> ::= "in"
 <logical_operators> ::= "and" | "or"
-<compound_single> ::= <expr> " " <logical_operators> " " <expr>
-<compound> ::= <expr> (" " <logical_operators> " " <expr>)+
+<simple_expr> ::= (<field> " " <comparison_operator> " " <value> | <negation>? <field> " " <set_comparison> " " <list>)
+<compound_inner> ::= <simple_expr> (" " <logical_operators> " " <simple_expr>)*
+<compound_expr> ::= "(" <compound_inner> ")"
+<expression> ::= <simple_expr> | <compound_expr> | (<compound_expr> | <simple_expr>) " " <logical_operators> " " (<compound_expr> | <simple_expr>)
 ```
