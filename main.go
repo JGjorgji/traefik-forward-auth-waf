@@ -41,16 +41,30 @@ type Config struct {
 }
 
 func (s *Server) getCountryByIP(ip net.IP) (string, error) {
-	if ip == nil {
-		return "", fmt.Errorf("invalid IP address")
-	}
-
 	record, err := s.db.Country(ip)
 	if err != nil {
 		return "", fmt.Errorf("failed to get country information: %w", err)
 	}
 
 	return record.Country.IsoCode, nil
+}
+
+func (s *Server) getContinentByIP(ip net.IP) (string, error) {
+	record, err := s.db.Country(ip)
+	if err != nil {
+		return "", fmt.Errorf("failed to get continent information: %w", err)
+	}
+
+	return record.Continent.Code, nil
+}
+
+func (s *Server) getAsnByIP(ip net.IP) (string, error) {
+	record, err := s.db.ASN(ip)
+	if err != nil {
+		return "", fmt.Errorf("failed to get continent information: %w", err)
+	}
+
+	return strconv.Itoa(int(record.AutonomousSystemNumber)), nil
 }
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
@@ -72,11 +86,12 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, err := s.getCountryByIP(ip)
-	if err != nil {
+	country, err_country := s.getCountryByIP(ip)
+	continent, err_continent := s.getContinentByIP(ip)
+	asnum, err_asnum := s.getAsnByIP(ip)
+	if err_country != nil || err_continent != nil || err_asnum != nil {
 		http.Error(w, uuid, http.StatusForbidden)
-		fmt.Println("Failed to get country information")
-		s.logger.Info("Failed to get country information", zap.String("action", "undefined"),
+		s.logger.Info("Failed to get GeoIP data, denying request as a fail safe.", zap.String("action", "undefined"),
 			zap.String("uuid", uuid),
 			zap.String("method", method),
 			zap.String("proto", proto),
@@ -93,9 +108,11 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	ctx.Variables[HttpHost] = host
 	ctx.Variables[HttpRequestUri] = uri
 	ctx.Variables[IpSrc] = forwardedFor
-	ctx.Variables[IpGeoipCountry] = record
+	ctx.Variables[IpGeoipCountry] = country
 	ctx.Variables[AuthHeader] = customAuthHeader
 	ctx.Variables[UserAgent] = userAgent
+	ctx.Variables[IpGeopipContinent] = continent
+	ctx.Variables[IpGeoipAsNum] = asnum
 
 	for i := range s.rules {
 		result, err := s.parsedRules[i].Evaluate(ctx)

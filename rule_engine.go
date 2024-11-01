@@ -80,6 +80,8 @@ const (
 	HttpHost          = "http.host"
 	IpSrc             = "ip.src"
 	IpGeoipCountry    = "ip.geoip.country"
+	IpGeopipContinent = "ip.geoip.continent"
+	IpGeoipAsNum      = "ip.geoip.asnum"
 	Proto             = "proto"
 	AuthHeader        = "authheader"
 	UserAgent         = "http.user_agent"
@@ -116,7 +118,7 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 			switch word {
 			case "not":
 				l.addToken(TOKEN_NOT, word)
-			case HttpRequestUri, HttpRequestMethod, HttpHost, IpSrc, IpGeoipCountry, Proto, AuthHeader:
+			case HttpRequestUri, HttpRequestMethod, HttpHost, IpSrc, IpGeoipCountry, IpGeopipContinent, Proto, AuthHeader, UserAgent:
 				l.addToken(TOKEN_FIELD, word)
 			case "eq", "ne", "wildcard":
 				l.addToken(TOKEN_COMPARISON, word)
