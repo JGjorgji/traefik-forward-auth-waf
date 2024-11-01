@@ -73,6 +73,18 @@ func NewLexer(input string) *Lexer {
 	}
 }
 
+// Field definitions
+const (
+	HttpRequestUri    = "http.request.uri"
+	HttpRequestMethod = "http.request.method"
+	HttpHost          = "http.host"
+	IpSrc             = "ip.src"
+	IpGeoipCountry    = "ip.geoip.country"
+	Proto             = "proto"
+	AuthHeader        = "authheader"
+	UserAgent         = "http.user_agent"
+)
+
 // Tokenize converts input string into tokens
 func (l *Lexer) Tokenize() ([]Token, error) {
 	for l.position < len(l.input) {
@@ -104,7 +116,7 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 			switch word {
 			case "not":
 				l.addToken(TOKEN_NOT, word)
-			case "uri", "host", "ip", "country":
+			case HttpRequestUri, HttpRequestMethod, HttpHost, IpSrc, IpGeoipCountry, Proto, AuthHeader:
 				l.addToken(TOKEN_FIELD, word)
 			case "eq", "ne", "wildcard":
 				l.addToken(TOKEN_COMPARISON, word)
@@ -155,7 +167,7 @@ func (l *Lexer) readString() (string, error) {
 
 func (l *Lexer) readWord() string {
 	start := l.position
-	for l.position < len(l.input) && (unicode.IsLetter(l.current()) || unicode.IsDigit(l.current())) {
+	for l.position < len(l.input) && (unicode.IsLetter(l.current()) || unicode.IsDigit(l.current()) || l.current() == '.') {
 		l.advance()
 	}
 	return l.input[start:l.position]
@@ -502,7 +514,7 @@ func (e *Evaluator) evaluateStatement(node Node, ctx *Context) (bool, error) {
 			values[i] = child.Value
 		}
 
-		if field == "ip" {
+		if field == "ip.src" {
 			result = e.InIpSetFn(value, values)
 		} else {
 			result = e.InSetFn(value, values)

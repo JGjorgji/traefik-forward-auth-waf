@@ -13,9 +13,9 @@ func TestLexer(t *testing.T) {
 	}{
 		{
 			name:  "simple equality",
-			input: `host eq "example.com"`,
+			input: `http.host eq "example.com"`,
 			expected: []Token{
-				{Type: TOKEN_FIELD, Value: "host", Position: 0},
+				{Type: TOKEN_FIELD, Value: "http.host", Position: 0},
 				{Type: TOKEN_COMPARISON, Value: "eq", Position: 4},
 				{Type: TOKEN_STRING, Value: "example.com", Position: 8},
 				{Type: TOKEN_EOF, Value: "", Position: 19},
@@ -24,16 +24,16 @@ func TestLexer(t *testing.T) {
 		},
 		{
 			name:  "compound expression with parentheses",
-			input: `(uri eq "*.jpg") and (country in {"US" "MK"})`,
+			input: `(http.request.uri eq "*.jpg") and (ip.geoip.country in {"US" "MK"})`,
 			expected: []Token{
 				{Type: TOKEN_LPAREN, Value: "(", Position: 0},
-				{Type: TOKEN_FIELD, Value: "uri", Position: 1},
+				{Type: TOKEN_FIELD, Value: "http.request.uri", Position: 1},
 				{Type: TOKEN_COMPARISON, Value: "eq", Position: 5},
 				{Type: TOKEN_STRING, Value: "*.jpg", Position: 9},
 				{Type: TOKEN_RPAREN, Value: ")", Position: 15},
 				{Type: TOKEN_LOGICAL_OP, Value: "and", Position: 17},
 				{Type: TOKEN_LPAREN, Value: "(", Position: 21},
-				{Type: TOKEN_FIELD, Value: "country", Position: 22},
+				{Type: TOKEN_FIELD, Value: "ip.geoip.country", Position: 22},
 				{Type: TOKEN_SET_COMPARISON, Value: "in", Position: 30},
 				{Type: TOKEN_LCURLY, Value: "{", Position: 33},
 				{Type: TOKEN_STRING, Value: "US", Position: 34},
@@ -46,12 +46,12 @@ func TestLexer(t *testing.T) {
 		},
 		{
 			name:    "invalid token",
-			input:   "host @ example.com",
+			input:   "http.host @ example.com",
 			wantErr: true,
 		},
 		{
 			name:    "unterminated string",
-			input:   `host eq "example.com`,
+			input:   `http.host eq "example.com`,
 			wantErr: true,
 		},
 	}
@@ -99,13 +99,13 @@ func TestParser(t *testing.T) {
 	}{
 		{
 			name:  "simple equality",
-			input: `host eq "example.com"`,
+			input: `http.host eq "example.com"`,
 			expected: Node{
 				Type: NODE_EXPRESSION,
 				Children: []Node{
 					{
 						Type:  NODE_STATEMENT,
-						Value: "host eq",
+						Value: "http.host eq",
 						Children: []Node{
 							{Type: NODE_EXPRESSION, Value: "example.com"},
 						},
@@ -116,13 +116,13 @@ func TestParser(t *testing.T) {
 		},
 		{
 			name:  "simple in set",
-			input: `country in {"US" "MK"}`,
+			input: `ip.geoip.country in {"US" "MK"}`,
 			expected: Node{
 				Type: NODE_EXPRESSION,
 				Children: []Node{
 					{
 						Type:  NODE_STATEMENT,
-						Value: "country in",
+						Value: "ip.geoip.country in",
 						Children: []Node{
 							{
 								Type:  NODE_EXPRESSION,
@@ -140,7 +140,7 @@ func TestParser(t *testing.T) {
 		},
 		{
 			name:    "invalid syntax",
-			input:   "host eq",
+			input:   "http.host eq",
 			wantErr: true,
 		},
 	}
@@ -207,81 +207,81 @@ func TestEvaluator(t *testing.T) {
 	}{
 		{
 			name:       "simple equality match",
-			expression: `host eq "example.com"`,
+			expression: `http.host eq "example.com"`,
 			context: map[string]string{
-				"host": "example.com",
+				"http.host": "example.com",
 			},
 			expected: true,
 			wantErr:  false,
 		},
 		{
 			name:       "simple equality non-match",
-			expression: `host eq "example.com"`,
+			expression: `http.host eq "example.com"`,
 			context: map[string]string{
-				"host": "other.com",
+				"http.host": "other.com",
 			},
 			expected: false,
 			wantErr:  false,
 		},
 		{
 			name:       "compound AND expression",
-			expression: `(host eq "example.com") and (country eq "US")`,
+			expression: `(http.host eq "example.com") and (ip.geoip.country eq "US")`,
 			context: map[string]string{
-				"host":    "example.com",
-				"country": "US",
+				"http.host":        "example.com",
+				"ip.geoip.country": "US",
 			},
 			expected: true,
 			wantErr:  false,
 		},
 		{
 			name:       "compound OR expression",
-			expression: `(host eq "example.com") or (country eq "US")`,
+			expression: `(http.host eq "example.com") or (ip.geoip.country eq "US")`,
 			context: map[string]string{
-				"host":    "other.com",
-				"country": "US",
+				"http.host":        "other.com",
+				"ip.geoip.country": "US",
 			},
 			expected: true,
 			wantErr:  false,
 		},
 		{
 			name:       "negated in set",
-			expression: `not country in {"US" "CA"}`,
+			expression: `not ip.geoip.country in {"US" "CA"}`,
 			context: map[string]string{
-				"country": "UK",
+				"ip.geoip.country": "UK",
 			},
 			expected: true,
 			wantErr:  false,
 		},
 		{
 			name:       "IP in CIDR",
-			expression: `ip in {"192.168.0.0/24"}`,
+			expression: `ip.src in {"192.168.0.0/24"}`,
 			context: map[string]string{
-				"ip": "192.168.0.1",
+				"ip.src": "192.168.0.1",
 			},
 			expected: true,
 			wantErr:  false,
 		},
 		{
 			name:       "IP not in CIDR",
-			expression: `ip in {"192.168.0.0/24"}`,
+			expression: `ip.src in {"192.168.0.0/24"}`,
 			context: map[string]string{
-				"ip": "192.169.0.1",
+				"ip.src": "192.169.0.1",
 			},
 			expected: false,
 			wantErr:  false,
 		},
 		{
 			name:       "wildcard match",
-			expression: `uri wildcard "*.jpg"`,
+			expression: `http.request.uri wildcard "/*.jpg"`,
 			context: map[string]string{
-				"uri": "image.jpg",
+				"http.request.uri": "/image.jpg",
 			},
 			expected: true,
 			wantErr:  false,
 		},
 		{
 			name:       "missing variable",
-			expression: `host eq "example.com"`,
+			expression: `http.host eq "example.com"`,
 			context:    map[string]string{},
 			wantErr:    true,
 		},
@@ -322,7 +322,7 @@ func TestEvaluator(t *testing.T) {
 }
 
 func TestCustomEvaluatorFunctions(t *testing.T) {
-	evaluator, err := NewExpressionEvaluator(`host eq "CUSTOM"`)
+	evaluator, err := NewExpressionEvaluator(`http.host eq "CUSTOM"`)
 	if err != nil {
 		t.Fatalf("failed to create evaluator: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestCustomEvaluatorFunctions(t *testing.T) {
 
 	ctx := NewContext()
 	ctx.Variables = map[string]string{
-		"host": "custom",
+		"http.host": "custom",
 	}
 
 	result, err := evaluator.Evaluate(ctx)

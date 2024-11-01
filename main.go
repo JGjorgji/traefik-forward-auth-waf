@@ -62,6 +62,7 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	uri := r.Header.Get("X-Forwarded-Uri")
 	forwardedFor := r.Header.Get("X-Forwarded-For")
 	customAuthHeader := r.Header.Get("X-Custom-Auth")
+	userAgent := r.Header.Get("User-Agent")
 
 	uuid := uuid.New().String()
 
@@ -87,13 +88,14 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := NewContext()
-	ctx.Variables["method"] = method
-	ctx.Variables["proto"] = proto
-	ctx.Variables["host"] = host
-	ctx.Variables["uri"] = uri
-	ctx.Variables["ip"] = forwardedFor
-	ctx.Variables["country"] = record
-	ctx.Variables["authheader"] = customAuthHeader
+	ctx.Variables[HttpRequestMethod] = method
+	ctx.Variables[Proto] = proto
+	ctx.Variables[HttpHost] = host
+	ctx.Variables[HttpRequestUri] = uri
+	ctx.Variables[IpSrc] = forwardedFor
+	ctx.Variables[IpGeoipCountry] = record
+	ctx.Variables[AuthHeader] = customAuthHeader
+	ctx.Variables[UserAgent] = userAgent
 
 	for i := range s.rules {
 		result, err := s.parsedRules[i].Evaluate(ctx)
