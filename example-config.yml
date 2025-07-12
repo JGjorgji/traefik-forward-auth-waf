@@ -1,0 +1,24 @@
+rules:
+  - name: allow well known
+    priority: 1
+    action: skip
+    rule: "(http.request.uri wildcard \"/.well-known/*\")"
+  - name: block outside of country
+    priority: 2
+    action: block
+    rule: "(not ip.geoip.country in {\"MK\"}) and (http.host eq \"example.com\")"
+  - name: require auth header
+    priority: 3
+    action: block
+    rule: "(http.request.headers[\"Authorization\"] eq \"\")"
+  - name: block specific user agents
+    priority: 4
+    action: block
+    rule: "(http.user_agent wildcard \"*bot*\")"
+
+server:
+  host: "127.0.0.1"
+  port: 1111
+  dbPath: /path/to/GeoLite2-Country.mmdb
+  requireGeoIP: false  # Set to true if you want to block requests when GeoIP fails
+  logLevel: info       # debug, info, warn, error

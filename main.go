@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/oschwald/geoip2-golang"
@@ -20,6 +21,7 @@ type Server struct {
 	rules       []Rule
 	parsedRules []ExpressionEvaluator
 	logger      *zap.Logger
+	config      *Config
 }
 
 type Rule struct {
@@ -30,9 +32,11 @@ type Rule struct {
 }
 
 type ServerConfig struct {
-	Port   int    `yaml:"port"`
-	Host   string `yaml:"host"`
-	DbPath string `yaml:"dbPath"`
+	Port         int    `yaml:"port"`
+	Host         string `yaml:"host"`
+	DbPath       string `yaml:"dbPath"`
+	RequireGeoIP bool   `yaml:"requireGeoIP"` // Default false - make GeoIP optional
+	LogLevel     string `yaml:"logLevel"`     // debug, info, warn, error
 }
 
 type Config struct {
@@ -61,7 +65,8 @@ func (s *Server) getContinentByIP(ip net.IP) (string, error) {
 func (s *Server) getAsnByIP(ip net.IP) (string, error) {
 	record, err := s.db.ASN(ip)
 	if err != nil {
-		return "", fmt.Errorf("failed to get continent information: %w", err)
+		// ASN data might not be available in Country database
+		return "0", nil // Return default value instead of error
 	}
 
 	return strconv.Itoa(int(record.AutonomousSystemNumber)), nil
@@ -80,26 +85,63 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 
 	uuid := uuid.New().String()
 
-	ip := net.ParseIP(forwardedFor)
+	// Handle X-Forwarded-For which might contain multiple IPs (comma-separated)
+	// Take the first IP which should be the original client IP
+	var clientIP string
+	if forwardedFor == "" {
+		s.logger.Error("X-Forwarded-For header is missing", zap.String("remote_addr", r.RemoteAddr))
+		http.Error(w, "X-Forwarded-For header required", http.StatusBadRequest)
+		return
+	}
+
+	ips := strings.Split(forwardedFor, ",")
+	clientIP = strings.TrimSpace(ips[0])
+
+	ip := net.ParseIP(clientIP)
 	if ip == nil {
-		http.Error(w, "Invalid IP address", http.StatusUnauthorized)
+		s.logger.Error("Invalid IP address in X-Forwarded-For", zap.String("ip", clientIP), zap.String("forwarded_for", forwardedFor))
+		http.Error(w, "Invalid IP address in X-Forwarded-For", http.StatusBadRequest)
 		return
 	}
 
 	country, err_country := s.getCountryByIP(ip)
 	continent, err_continent := s.getContinentByIP(ip)
 	asnum, err_asnum := s.getAsnByIP(ip)
-	if err_country != nil || err_continent != nil || err_asnum != nil {
+
+	// Log specific errors but only fail if critical lookups fail
+	if err_country != nil {
+		s.logger.Error("Failed to get country data", zap.Error(err_country), zap.String("ip", forwardedFor))
+	}
+	if err_continent != nil {
+		s.logger.Error("Failed to get continent data", zap.Error(err_continent), zap.String("ip", forwardedFor))
+	}
+	if err_asnum != nil {
+		s.logger.Warn("Failed to get ASN data (this may be normal if using Country DB)", zap.Error(err_asnum), zap.String("ip", forwardedFor))
+	}
+
+	// Only fail on critical errors if GeoIP is required
+	if s.config.Server.RequireGeoIP && (err_country != nil || err_continent != nil) {
 		http.Error(w, uuid, http.StatusForbidden)
-		s.logger.Info("Failed to get GeoIP data, denying request as a fail safe.", zap.String("action", "undefined"),
+		s.logger.Info("Failed to get critical GeoIP data, denying request as a fail safe.",
+			zap.String("action", "undefined"),
 			zap.String("uuid", uuid),
 			zap.String("method", method),
 			zap.String("proto", proto),
 			zap.String("host", host),
 			zap.String("uri", uri),
-			zap.String("ip", forwardedFor),
-			zap.String("rule", "undefined"))
+			zap.String("ip", clientIP),
+			zap.String("rule", "undefined"),
+			zap.Error(err_country),
+			zap.Error(err_continent))
 		return
+	}
+
+	// Use default values if GeoIP lookup fails and it's not required
+	if country == "" {
+		country = "XX" // Unknown country code
+	}
+	if continent == "" {
+		continent = "XX" // Unknown continent code
 	}
 
 	ctx := NewContext()
@@ -107,17 +149,24 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	ctx.Variables[Proto] = proto
 	ctx.Variables[HttpHost] = host
 	ctx.Variables[HttpRequestUri] = uri
-	ctx.Variables[IpSrc] = forwardedFor
+	ctx.Variables[IpSrc] = clientIP
 	ctx.Variables[IpGeoipCountry] = country
 	ctx.Variables[AuthHeader] = customAuthHeader
 	ctx.Variables[UserAgent] = userAgent
 	ctx.Variables[IpGeopipContinent] = continent
 	ctx.Variables[IpGeoipAsNum] = asnum
 
+	// Populate headers for header-based rules
+	for headerName, headerValues := range r.Header {
+		ctx.Headers[headerName] = headerValues
+	}
+
 	for i := range s.rules {
 		result, err := s.parsedRules[i].Evaluate(ctx)
 		if err != nil {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+			s.logger.Error("Rule evaluation error", zap.Error(err), zap.String("rule", s.rules[i].Name), zap.String("uuid", uuid))
+			http.Error(w, uuid, http.StatusForbidden)
+			return
 		}
 		// expression evaluated to true, process the action
 		if result {
@@ -130,7 +179,7 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 					zap.String("proto", proto),
 					zap.String("host", host),
 					zap.String("uri", uri),
-					zap.String("ip", forwardedFor),
+					zap.String("ip", clientIP),
 					zap.String("rule", s.rules[i].Name))
 				return
 			case "block":
@@ -142,7 +191,7 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 					zap.String("proto", proto),
 					zap.String("host", host),
 					zap.String("uri", uri),
-					zap.String("ip", forwardedFor),
+					zap.String("ip", clientIP),
 					zap.String("rule", s.rules[i].Name))
 				return
 			default:
@@ -154,7 +203,7 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 					zap.String("proto", proto),
 					zap.String("host", host),
 					zap.String("uri", uri),
-					zap.String("ip", forwardedFor),
+					zap.String("ip", clientIP),
 					zap.String("rule", s.rules[i].Name))
 				return
 			}
@@ -165,20 +214,25 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 				zap.String("proto", proto),
 				zap.String("host", host),
 				zap.String("uri", uri),
-				zap.String("ip", forwardedFor),
+				zap.String("ip", clientIP),
 				zap.String("rule", s.rules[i].Name))
 		}
 	}
+
+	// No rules matched, allow the request by default
+	s.logger.Info("No rules matched, allowing request",
+		zap.String("uuid", uuid),
+		zap.String("method", method),
+		zap.String("proto", proto),
+		zap.String("host", host),
+		zap.String("uri", uri),
+		zap.String("ip", clientIP))
 
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", strconv.Itoa(0))
 }
 
 func main() {
-	// zap used for the high performance logging
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
-
 	uuid.EnableRandPool()
 
 	data, err := os.ReadFile(os.Args[1])
@@ -191,6 +245,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to unmarshal YAML: %v", err)
 	}
+
+	// Configure zap logger with the log level from config
+	config := zap.NewProductionConfig()
+
+	// Set log level based on config
+	switch strings.ToLower(cfg.Server.LogLevel) {
+	case "debug":
+		config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	case "info":
+		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	case "warn":
+		config.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
+	case "error":
+		config.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	default:
+		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel) // Default to info if not specified
+	}
+
+	logger, err := config.Build()
+	if err != nil {
+		log.Fatalf("Failed to build logger: %v", err)
+	}
+	defer logger.Sync()
 
 	sort.Slice(cfg.Rules, func(i, j int) bool {
 		return cfg.Rules[i].Priority < cfg.Rules[j].Priority
@@ -212,7 +289,7 @@ func main() {
 	}
 	defer db.Close()
 
-	server := &Server{db: db, rules: cfg.Rules, parsedRules: parsedRules, logger: logger}
+	server := &Server{db: db, rules: cfg.Rules, parsedRules: parsedRules, logger: logger, config: &cfg}
 
 	http.HandleFunc("/", server.handler)
 

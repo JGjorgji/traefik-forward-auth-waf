@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -24,6 +25,10 @@ const (
 	TOKEN_LCURLY
 	TOKEN_RCURLY
 	TOKEN_LOGICAL_OP
+	TOKEN_LBRACKET
+	TOKEN_RBRACKET
+	TOKEN_FUNCTION
+	TOKEN_COMMA
 	TOKEN_EOF
 )
 
@@ -54,6 +59,9 @@ const (
 	NODE_EXPRESSION NodeType = iota
 	NODE_STATEMENT
 	NODE_COMPOUND
+	NODE_FUNCTION_CALL
+	NODE_HEADER_ACCESS
+	NODE_ARRAY_ACCESS
 )
 
 // Node represents an AST node
@@ -61,6 +69,7 @@ type Node struct {
 	Type     NodeType
 	Value    string
 	Negated  bool
+	Index    string // For array access like [0] or [*]
 	Children []Node
 }
 
@@ -75,16 +84,18 @@ func NewLexer(input string) *Lexer {
 
 // Field definitions
 const (
-	HttpRequestUri    = "http.request.uri"
-	HttpRequestMethod = "http.request.method"
-	HttpHost          = "http.host"
-	IpSrc             = "ip.src"
-	IpGeoipCountry    = "ip.geoip.country"
-	IpGeopipContinent = "ip.geoip.continent"
-	IpGeoipAsNum      = "ip.geoip.asnum"
-	Proto             = "proto"
-	AuthHeader        = "authheader"
-	UserAgent         = "http.user_agent"
+	HttpRequestUri          = "http.request.uri"
+	HttpRequestMethod       = "http.request.method"
+	HttpHost                = "http.host"
+	HttpRequestHeaders      = "http.request.headers"
+	HttpRequestHeadersNames = "http.request.headers.names"
+	IpSrc                   = "ip.src"
+	IpGeoipCountry          = "ip.geoip.country"
+	IpGeopipContinent       = "ip.geoip.continent"
+	IpGeoipAsNum            = "ip.geoip.asnum"
+	Proto                   = "proto"
+	AuthHeader              = "authheader"
+	UserAgent               = "http.user_agent"
 )
 
 // Tokenize converts input string into tokens
@@ -105,6 +116,15 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 		case char == '}':
 			l.addToken(TOKEN_RCURLY, "}")
 			l.advance()
+		case char == '[':
+			l.addToken(TOKEN_LBRACKET, "[")
+			l.advance()
+		case char == ']':
+			l.addToken(TOKEN_RBRACKET, "]")
+			l.advance()
+		case char == ',':
+			l.addToken(TOKEN_COMMA, ",")
+			l.advance()
 		case char == '"':
 			token, err := l.readString()
 			if err != nil {
@@ -118,7 +138,7 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 			switch word {
 			case "not":
 				l.addToken(TOKEN_NOT, word)
-			case HttpRequestUri, HttpRequestMethod, HttpHost, IpSrc, IpGeoipCountry, IpGeopipContinent, Proto, AuthHeader, UserAgent:
+			case HttpRequestUri, HttpRequestMethod, HttpHost, HttpRequestHeaders, HttpRequestHeadersNames, IpSrc, IpGeoipCountry, IpGeopipContinent, IpGeoipAsNum, Proto, AuthHeader, UserAgent:
 				l.addToken(TOKEN_FIELD, word)
 			case "eq", "ne", "wildcard":
 				l.addToken(TOKEN_COMPARISON, word)
@@ -126,9 +146,15 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 				l.addToken(TOKEN_SET_COMPARISON, word)
 			case "and", "or":
 				l.addToken(TOKEN_LOGICAL_OP, word)
+			case "any", "lower":
+				l.addToken(TOKEN_FUNCTION, word)
 			default:
 				return nil, fmt.Errorf("unexpected word: %s", word)
 			}
+		case unicode.IsDigit(char) || char == '*':
+			// Handle numbers and * for array indexing
+			value := l.readIndexValue()
+			l.addToken(TOKEN_STRING, value)
 		default:
 			return nil, fmt.Errorf("unexpected character: %c", char)
 		}
@@ -170,6 +196,18 @@ func (l *Lexer) readString() (string, error) {
 func (l *Lexer) readWord() string {
 	start := l.position
 	for l.position < len(l.input) && (unicode.IsLetter(l.current()) || unicode.IsDigit(l.current()) || l.current() == '.') {
+		l.advance()
+	}
+	return l.input[start:l.position]
+}
+
+func (l *Lexer) readIndexValue() string {
+	start := l.position
+	if l.current() == '*' {
+		l.advance()
+		return "*"
+	}
+	for l.position < len(l.input) && unicode.IsDigit(l.current()) {
 		l.advance()
 	}
 	return l.input[start:l.position]
@@ -258,11 +296,19 @@ func (p *Parser) parseSimpleExpr() (Node, error) {
 		p.advance()
 	}
 
+	// Check for function calls like any()
+	if p.current().Type == TOKEN_FUNCTION {
+		return p.parseFunctionCall(negated)
+	}
+
 	if p.current().Type != TOKEN_FIELD {
 		return Node{}, errors.New("expected field")
 	}
-	field := p.current().Value
-	p.advance()
+
+	fieldExpr, err := p.parseFieldExpression()
+	if err != nil {
+		return Node{}, err
+	}
 
 	// Parse operator
 	var operator string
@@ -285,7 +331,6 @@ func (p *Parser) parseSimpleExpr() (Node, error) {
 
 	// Parse value based on operator type
 	var value Node
-	var err error
 	if isSetComparison {
 		value, err = p.parseSet()
 	} else {
@@ -297,9 +342,10 @@ func (p *Parser) parseSimpleExpr() (Node, error) {
 
 	stmt := Node{
 		Type:     NODE_STATEMENT,
-		Value:    fmt.Sprintf("%s %s", field, operator),
+		Value:    fmt.Sprintf("%s %s", fieldExpr.Value, operator),
 		Children: []Node{value},
 		Negated:  negated,
+		Index:    fieldExpr.Index,
 	}
 
 	return Node{
@@ -352,15 +398,111 @@ func (p *Parser) advance() {
 	p.position++
 }
 
+func (p *Parser) parseFieldExpression() (Node, error) {
+	if p.current().Type != TOKEN_FIELD {
+		return Node{}, errors.New("expected field")
+	}
+
+	fieldName := p.current().Value
+	p.advance()
+
+	// Check for header access like http.request.headers["Header-Name"] or http.request.headers.names[0]
+	if p.current().Type == TOKEN_LBRACKET {
+		p.advance() // consume [
+
+		var index string
+		var headerName string
+
+		if p.current().Type == TOKEN_STRING {
+			if fieldName == HttpRequestHeaders {
+				// This is http.request.headers["Header-Name"]
+				headerName = p.current().Value
+				p.advance()
+				if p.current().Type != TOKEN_RBRACKET {
+					return Node{}, errors.New("expected ]")
+				}
+				p.advance()
+				return Node{
+					Type:  NODE_HEADER_ACCESS,
+					Value: fmt.Sprintf("%s.%s", fieldName, headerName),
+				}, nil
+			} else {
+				// This is array index like [0] or [*]
+				index = p.current().Value
+				p.advance()
+			}
+		} else {
+			return Node{}, errors.New("expected string or number in brackets")
+		}
+
+		if p.current().Type != TOKEN_RBRACKET {
+			return Node{}, errors.New("expected ]")
+		}
+		p.advance()
+
+		return Node{
+			Type:  NODE_ARRAY_ACCESS,
+			Value: fieldName,
+			Index: index,
+		}, nil
+	}
+
+	// Regular field access
+	return Node{
+		Type:  NODE_EXPRESSION,
+		Value: fieldName,
+	}, nil
+}
+
+func (p *Parser) parseFunctionCall(negated bool) (Node, error) {
+	functionName := p.current().Value
+	p.advance()
+
+	if p.current().Type != TOKEN_LPAREN {
+		return Node{}, errors.New("expected ( after function name")
+	}
+	p.advance()
+
+	// Parse function arguments
+	var args []Node
+	for p.current().Type != TOKEN_RPAREN && p.current().Type != TOKEN_EOF {
+		arg, err := p.parseExpr()
+		if err != nil {
+			return Node{}, err
+		}
+		args = append(args, arg)
+
+		if p.current().Type == TOKEN_COMMA {
+			p.advance()
+		} else if p.current().Type != TOKEN_RPAREN {
+			return Node{}, errors.New("expected , or ) in function call")
+		}
+	}
+
+	if p.current().Type != TOKEN_RPAREN {
+		return Node{}, errors.New("expected ) to close function call")
+	}
+	p.advance()
+
+	return Node{
+		Type:     NODE_FUNCTION_CALL,
+		Value:    functionName,
+		Negated:  negated,
+		Children: args,
+	}, nil
+}
+
 // Context holds the variable values for evaluation
 type Context struct {
 	Variables map[string]string
+	Headers   map[string][]string // Store headers as arrays
 }
 
 // NewContext creates a new evaluation context
 func NewContext() *Context {
 	return &Context{
 		Variables: make(map[string]string),
+		Headers:   make(map[string][]string),
 	}
 }
 
@@ -437,6 +579,12 @@ func (e *Evaluator) Evaluate(node Node, ctx *Context) (bool, error) {
 		return false, fmt.Errorf("invalid expression node")
 	case NODE_STATEMENT:
 		return e.evaluateStatement(node, ctx)
+	case NODE_FUNCTION_CALL:
+		return e.evaluateFunctionCall(node, ctx)
+	case NODE_HEADER_ACCESS:
+		return false, fmt.Errorf("header access should be evaluated within statement")
+	case NODE_ARRAY_ACCESS:
+		return false, fmt.Errorf("array access should be evaluated within statement")
 	default:
 		return false, fmt.Errorf("unknown node type")
 	}
@@ -487,10 +635,10 @@ func (e *Evaluator) evaluateStatement(node Node, ctx *Context) (bool, error) {
 	field := parts[0]
 	operator := parts[1]
 
-	// Get the actual value from context
-	value, exists := ctx.Variables[field]
-	if !exists {
-		return false, fmt.Errorf("undefined variable: %s", field)
+	// Get the actual value from context (supports header access)
+	value, err := e.getValueFromContext(field, node.Index, ctx)
+	if err != nil {
+		return false, err
 	}
 
 	if len(node.Children) != 1 {
@@ -543,6 +691,75 @@ func (e *Evaluator) evaluateStatement(node Node, ctx *Context) (bool, error) {
 	}
 
 	return result, nil
+}
+
+func (e *Evaluator) evaluateFunctionCall(node Node, ctx *Context) (bool, error) {
+	switch node.Value {
+	case "any":
+		if len(node.Children) != 1 {
+			return false, fmt.Errorf("any() function expects exactly one argument")
+		}
+
+		// For now, we'll handle a simplified version
+		// In a full implementation, this would evaluate the expression for each array element
+		return e.Evaluate(node.Children[0], ctx)
+
+	case "lower":
+		return false, fmt.Errorf("lower() function not yet implemented")
+
+	default:
+		return false, fmt.Errorf("unknown function: %s", node.Value)
+	}
+}
+
+func (e *Evaluator) getValueFromContext(field string, index string, ctx *Context) (string, error) {
+	// Handle header names access
+	if field == HttpRequestHeadersNames {
+		var names []string
+		for name := range ctx.Headers {
+			names = append(names, name)
+		}
+		// Sort names to ensure consistent ordering
+		sort.Strings(names)
+
+		if index == "*" {
+			return "", fmt.Errorf("array operations not yet fully implemented")
+		}
+		// Parse index as number
+		idx := 0
+		if index != "0" {
+			return "", fmt.Errorf("only index 0 currently supported")
+		}
+		if idx >= len(names) {
+			return "", nil // Missing value
+		}
+		return names[idx], nil
+	}
+
+	// Handle header access
+	if strings.HasPrefix(field, HttpRequestHeaders+".") {
+		headerName := strings.TrimPrefix(field, HttpRequestHeaders+".")
+		headers, exists := ctx.Headers[headerName]
+		if !exists {
+			return "", nil // Return empty string for missing headers (allows rules to continue)
+		}
+		if len(headers) == 0 {
+			return "", nil // Return empty string for headers with no values
+		}
+		return headers[0], nil // Return first value for simplicity
+	}
+
+	// Handle array access for other fields
+	if index != "" {
+		return "", fmt.Errorf("array access not supported for field: %s", field)
+	}
+
+	// Regular variable access
+	value, exists := ctx.Variables[field]
+	if !exists {
+		return "", fmt.Errorf("undefined variable: %s", field)
+	}
+	return value, nil
 }
 
 // ExpressionEvaluator wraps an AST and Evaluator for convenient evaluation

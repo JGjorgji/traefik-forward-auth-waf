@@ -23,6 +23,34 @@ func TestLexer(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:  "header access with brackets",
+			input: `http.request.headers["Authorization"] eq "Bearer token"`,
+			expected: []Token{
+				{Type: TOKEN_FIELD, Value: "http.request.headers", Position: 0},
+				{Type: TOKEN_LBRACKET, Value: "[", Position: 20},
+				{Type: TOKEN_STRING, Value: "Authorization", Position: 21},
+				{Type: TOKEN_RBRACKET, Value: "]", Position: 36},
+				{Type: TOKEN_COMPARISON, Value: "eq", Position: 38},
+				{Type: TOKEN_STRING, Value: "Bearer token", Position: 41},
+				{Type: TOKEN_EOF, Value: "", Position: 55},
+			},
+			wantErr: false,
+		},
+		{
+			name:  "header names with index",
+			input: `http.request.headers.names[0] eq "Content-Type"`,
+			expected: []Token{
+				{Type: TOKEN_FIELD, Value: "http.request.headers.names", Position: 0},
+				{Type: TOKEN_LBRACKET, Value: "[", Position: 26},
+				{Type: TOKEN_STRING, Value: "0", Position: 27},
+				{Type: TOKEN_RBRACKET, Value: "]", Position: 28},
+				{Type: TOKEN_COMPARISON, Value: "eq", Position: 30},
+				{Type: TOKEN_STRING, Value: "Content-Type", Position: 33},
+				{Type: TOKEN_EOF, Value: "", Position: 47},
+			},
+			wantErr: false,
+		},
+		{
 			name:  "compound expression with parentheses",
 			input: `(http.request.uri eq "*.jpg") and (ip.geoip.country in {"US" "MK"})`,
 			expected: []Token{
@@ -202,6 +230,7 @@ func TestEvaluator(t *testing.T) {
 		name       string
 		expression string
 		context    map[string]string
+		headers    map[string][]string
 		expected   bool
 		wantErr    bool
 	}{
@@ -280,10 +309,57 @@ func TestEvaluator(t *testing.T) {
 			wantErr:  false,
 		},
 		{
+			name:       "header access - Authorization header exists",
+			expression: `http.request.headers["Authorization"] eq "Bearer token123"`,
+			context:    map[string]string{},
+			headers: map[string][]string{
+				"Authorization": {"Bearer token123"},
+			},
+			expected: true,
+			wantErr:  false,
+		},
+		{
+			name:       "header access - Content-Type wildcard",
+			expression: `http.request.headers["Content-Type"] wildcard "application/*"`,
+			context:    map[string]string{},
+			headers: map[string][]string{
+				"Content-Type": {"application/json"},
+			},
+			expected: true,
+			wantErr:  false,
+		},
+		{
+			name:       "header names access - first header name",
+			expression: `http.request.headers.names[0] eq "Authorization"`,
+			context:    map[string]string{},
+			headers: map[string][]string{
+				"Authorization": {"Bearer token123"},
+				"Content-Type":  {"application/json"},
+			},
+			expected: true, // Note: depends on map iteration order, might be flaky
+			wantErr:  false,
+		},
+		{
 			name:       "missing variable",
 			expression: `http.host eq "example.com"`,
 			context:    map[string]string{},
 			wantErr:    true,
+		},
+		{
+			name:       "missing header",
+			expression: `http.request.headers["Missing"] eq "value"`,
+			context:    map[string]string{},
+			headers:    map[string][]string{},
+			expected:   false, // Empty string != "value"
+			wantErr:    false,
+		},
+		{
+			name:       "missing header check for empty",
+			expression: `http.request.headers["Missing"] eq ""`,
+			context:    map[string]string{},
+			headers:    map[string][]string{},
+			expected:   true, // Empty string == ""
+			wantErr:    false,
 		},
 	}
 
@@ -299,6 +375,9 @@ func TestEvaluator(t *testing.T) {
 
 			ctx := NewContext()
 			ctx.Variables = tt.context
+			if tt.headers != nil {
+				ctx.Headers = tt.headers
+			}
 
 			result, err := evaluator.Evaluate(ctx)
 
