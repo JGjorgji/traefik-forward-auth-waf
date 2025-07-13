@@ -157,8 +157,10 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	ctx.Variables[IpGeoipAsNum] = asnum
 
 	// Populate headers for header-based rules
+	// Store headers with lowercase keys for case-insensitive matching per HTTP spec
 	for headerName, headerValues := range r.Header {
-		ctx.Headers[headerName] = headerValues
+		ctx.Headers[strings.ToLower(headerName)] = headerValues
+		ctx.OriginalNames = append(ctx.OriginalNames, headerName)
 	}
 
 	for i := range s.rules {
@@ -208,7 +210,7 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			s.logger.Debug("Request doesn't match any rule", zap.String("action", s.rules[i].Action),
+			s.logger.Debug("Rule did not match", zap.String("action", s.rules[i].Action),
 				zap.String("uuid", uuid),
 				zap.String("method", method),
 				zap.String("proto", proto),

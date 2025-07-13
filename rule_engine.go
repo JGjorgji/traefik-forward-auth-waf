@@ -494,15 +494,17 @@ func (p *Parser) parseFunctionCall(negated bool) (Node, error) {
 
 // Context holds the variable values for evaluation
 type Context struct {
-	Variables map[string]string
-	Headers   map[string][]string // Store headers as arrays
+	Variables     map[string]string
+	Headers       map[string][]string // Store headers as arrays with normalized (lowercase) keys
+	OriginalNames []string            // Store original header names for header.names access
 }
 
 // NewContext creates a new evaluation context
 func NewContext() *Context {
 	return &Context{
-		Variables: make(map[string]string),
-		Headers:   make(map[string][]string),
+		Variables:     make(map[string]string),
+		Headers:       make(map[string][]string),
+		OriginalNames: make([]string, 0),
 	}
 }
 
@@ -712,13 +714,26 @@ func (e *Evaluator) evaluateFunctionCall(node Node, ctx *Context) (bool, error) 
 	}
 }
 
+// Helper function for case-insensitive header lookup
+func (e *Evaluator) getHeaderValue(headerName string, ctx *Context) (string, bool) {
+	// Normalize header name to lowercase for case-insensitive matching
+	normalizedName := strings.ToLower(headerName)
+
+	// Try direct lookup first
+	if headers, exists := ctx.Headers[normalizedName]; exists {
+		if len(headers) == 0 {
+			return "", true // Header exists but has no values
+		}
+		return headers[0], true // Return first value
+	}
+
+	return "", false // Header not found
+}
+
 func (e *Evaluator) getValueFromContext(field string, index string, ctx *Context) (string, error) {
 	// Handle header names access
 	if field == HttpRequestHeadersNames {
-		var names []string
-		for name := range ctx.Headers {
-			names = append(names, name)
-		}
+		names := ctx.OriginalNames
 		// Sort names to ensure consistent ordering
 		sort.Strings(names)
 
@@ -739,14 +754,11 @@ func (e *Evaluator) getValueFromContext(field string, index string, ctx *Context
 	// Handle header access
 	if strings.HasPrefix(field, HttpRequestHeaders+".") {
 		headerName := strings.TrimPrefix(field, HttpRequestHeaders+".")
-		headers, exists := ctx.Headers[headerName]
+		value, exists := e.getHeaderValue(headerName, ctx)
 		if !exists {
 			return "", nil // Return empty string for missing headers (allows rules to continue)
 		}
-		if len(headers) == 0 {
-			return "", nil // Return empty string for headers with no values
-		}
-		return headers[0], nil // Return first value for simplicity
+		return value, nil
 	}
 
 	// Handle array access for other fields

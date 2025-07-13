@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -340,6 +341,36 @@ func TestEvaluator(t *testing.T) {
 			wantErr:  false,
 		},
 		{
+			name:       "header access - case insensitive (lowercase rule, uppercase header)",
+			expression: `http.request.headers["content-type"] eq "application/json"`,
+			context:    map[string]string{},
+			headers: map[string][]string{
+				"Content-Type": {"application/json"},
+			},
+			expected: true,
+			wantErr:  false,
+		},
+		{
+			name:       "header access - case insensitive (uppercase rule, lowercase header)",
+			expression: `http.request.headers["AUTHORIZATION"] eq "Bearer token123"`,
+			context:    map[string]string{},
+			headers: map[string][]string{
+				"authorization": {"Bearer token123"},
+			},
+			expected: true,
+			wantErr:  false,
+		},
+		{
+			name:       "header access - case insensitive (mixed case)",
+			expression: `http.request.headers["X-Custom-Header"] eq "custom-value"`,
+			context:    map[string]string{},
+			headers: map[string][]string{
+				"x-custom-header": {"custom-value"},
+			},
+			expected: true,
+			wantErr:  false,
+		},
+		{
 			name:       "missing variable",
 			expression: `http.host eq "example.com"`,
 			context:    map[string]string{},
@@ -376,7 +407,11 @@ func TestEvaluator(t *testing.T) {
 			ctx := NewContext()
 			ctx.Variables = tt.context
 			if tt.headers != nil {
-				ctx.Headers = tt.headers
+				// Normalize header names to lowercase for case-insensitive matching per HTTP spec
+				for headerName, headerValues := range tt.headers {
+					ctx.Headers[strings.ToLower(headerName)] = headerValues
+					ctx.OriginalNames = append(ctx.OriginalNames, headerName)
+				}
 			}
 
 			result, err := evaluator.Evaluate(ctx)
